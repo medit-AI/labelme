@@ -15,14 +15,70 @@ labels:
 file_search:
 sort_labels: true
 validate_label:
+# Regex restricting what can be typed into the label field, e.g. "^(1[0-9]|[2-4][0-9]|50)$"
+# to allow only integers from 10 to 50. null disables the restriction.
+label_pattern: "^(?:[1-9]|[12][0-9]|3[0-2]|[A-T])$"
 shape_color:
-  mode: auto  # auto, uniform, by_label
+  mode: by_label  # auto, uniform, by_label
   auto:
     shift: 0
   uniform:
     color: [0, 255, 0]
   by_label:
     colors:
+      '1': [150, 5, 61]
+      '10': [16, 0, 0]
+      '11': [0, 136, 0]
+      '12': [0, 0, 176]
+      '13': [176, 0, 0]
+      '14': [160, 0, 191]
+      '15': [171, 191, 0]
+      '16': [86, 0, 0]
+      '17': [86, 0, 0]
+      '18': [171, 191, 0]
+      '19': [160, 0, 191]
+      '2': [235, 255, 7]
+      '20': [176, 0, 0]
+      '21': [0, 0, 176]
+      '22': [0, 136, 0]
+      '23': [16, 0, 0]
+      '24': [0, 166, 166]
+      '25': [6, 230, 230]
+      '26': [80, 50, 50]
+      '27': [4, 200, 3]
+      '28': [30, 20, 240]
+      '29': [240, 10, 7]
+      '3': [224, 5, 255]
+      '30': [224, 5, 255]
+      '31': [235, 255, 7]
+      '32': [150, 5, 61]
+      '4': [240, 10, 7]
+      '5': [30, 20, 240]
+      '6': [4, 200, 3]
+      '7': [80, 50, 50]
+      '8': [6, 230, 230]
+      '9': [0, 166, 166]
+      A: [255, 86, 83]
+      B: [106, 96, 255]
+      C: [80, 255, 79]
+      D: [156, 126, 126]
+      E: [82, 255, 255]
+      F: [76, 242, 242]
+      G: [92, 76, 76]
+      H: [76, 212, 76]
+      I: [76, 76, 252]
+      J: [252, 76, 76]
+      K: [252, 76, 76]
+      L: [76, 76, 252]
+      M: [76, 212, 76]
+      N: [92, 76, 76]
+      O: [76, 242, 242]
+      P: [82, 255, 255]
+      Q: [156, 126, 126]
+      R: [80, 255, 79]
+      S: [106, 96, 255]
+      T: [255, 86, 83]
+
     fallback: [0, 255, 0]
 shape:
   # drawing
@@ -110,6 +166,8 @@ shortcuts:
   create_line:
   create_point:
   create_linestrip:
+  ai_points_to_shape: Ctrl+I
+  ai_box_to_shape: Ctrl+B
   edit_shape: Ctrl+J
   delete_shape: Delete
   duplicate_shape: Ctrl+D

@@ -165,7 +165,12 @@ def add_actions(
             widget.addAction(action)
 
 
-def label_validator() -> QtGui.QRegularExpressionValidator:
+def label_validator(pattern: str | None = None) -> QtGui.QRegularExpressionValidator:
+    if pattern is not None:
+        # A custom pattern replaces the default shape entirely, so config-level
+        # restrictions (e.g. digits only, a numeric range) can block keystrokes
+        # as the user types rather than only rejecting on submit.
+        return QtGui.QRegularExpressionValidator(QtCore.QRegularExpression(pattern))
     # Accepts strings of 2+ chars not starting with space or tab.
     # Single non-whitespace char is Intermediate (handled by regex partial match).
     return QtGui.QRegularExpressionValidator(QtCore.QRegularExpression(r"[^ \t].+"))

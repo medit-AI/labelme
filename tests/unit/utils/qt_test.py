@@ -118,6 +118,26 @@ def test_label_validator_rejects_single_char() -> None:
     assert state != QtGui.QValidator.State.Acceptable
 
 
+def test_label_validator_custom_pattern_accepts_in_range_number() -> None:
+    v = label_validator(pattern=r"^(1[0-9]|[2-4][0-9]|50)$")
+    state, _, _ = v.validate("25", 2)  # ty: ignore[not-iterable]
+    assert state == QtGui.QValidator.State.Acceptable
+
+
+def test_label_validator_custom_pattern_rejects_out_of_range_number() -> None:
+    v = label_validator(pattern=r"^(1[0-9]|[2-4][0-9]|50)$")
+    state, _, _ = v.validate("60", 2)  # ty: ignore[not-iterable]
+    assert state == QtGui.QValidator.State.Invalid
+
+
+def test_label_validator_custom_pattern_allows_intermediate_prefix() -> None:
+    # "5" alone is not acceptable (only 50 is valid in range) but must stay
+    # Intermediate rather than Invalid so the user can keep typing toward "50".
+    v = label_validator(pattern=r"^(1[0-9]|[2-4][0-9]|50)$")
+    state, _, _ = v.validate("5", 1)  # ty: ignore[not-iterable]
+    assert state == QtGui.QValidator.State.Intermediate
+
+
 # ---------------------------------------------------------------------------
 # new_icon
 # ---------------------------------------------------------------------------

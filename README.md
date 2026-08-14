@@ -203,3 +203,28 @@ pyinstaller labelme/labelme/__main__.py \
 ## Acknowledgement
 
 This repo is the fork of [mpitid/pylabelme](https://github.com/mpitid/pylabelme).
+
+
+--------
+
+
+python -m labelme --version 정상 동작 확인했습니다. 이제 F5 실행과 runmain.py도 될 겁니다.
+
+정리 — 왜 안 됐고 뭘 고쳤는지:
+
+labelme/init.py:10의 importlib.metadata.version("labelme")는 labelme가 그 인터프리터에 pip으로 설치되어 있어야만 동작합니다. annotation-apps-nerve-seg 환경엔 labelme 자체도, onnxruntime/osam 같은 필수 의존성도 설치된 적이 없어서 import labelme가 되는 즉시 죽었던 겁니다 — python -m labelme든 tools/runmain.py든 진입 방식은 무관하게 전부 같은 원인.
+
+pip install -e . --ignore-requires-python으로 해결 (dry-run으로 먼저 확인 — 기존 numpy/PySide6/scipy 등은 전혀 안 건드리고 onnxruntime, osam 등 누락된 패키지만 추가 설치됨)
+--ignore-requires-python이 필요했던 이유: pyproject.toml이 >=3.12를 요구하는데 이 conda 환경은 3.11.10. CHANGELOG 확인 결과 이건 numpy/scipy가 SPEC0 정책으로 3.12를 요구해서 올린 상한선이고, 실제 코드에 3.12 전용 문법은 없음 → 우회해도 안전
+에디터블 설치라서 소스 수정하면 재설치 없이 바로 반영됨
+남은 것 — F5:
+.vscode/launch.json에 "module": "labelme" 방식(= python -m labelme와 동일)으로 설정해뒀습니다. tools/runmain.py도 이제 그냥 실행하면 됩니다.
+
+PyInstaller 패키징:
+README에 이미 공식 빌드 명령이 있었습니다 (README.md:185-201) — osam의 모델 파일까지 포함해서 --add-data로 번들링하는 방식입니다. 이걸 Windows 경로 구분자(;)에 맞게 다음 단계로 실행해볼까요, 아니면 
+
+
+
+* 치아 universal color 테이블화
+  * examples\colortable.py::get_universial_color_table() : key - universal / value 색상  테이블 생성
+  * examples\colortable.py::create_color_table_image() [wiki 설명 테이블 이미지 생성](https://en.wikipedia.org/wiki/Universal_Numbering_System)

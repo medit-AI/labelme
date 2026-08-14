@@ -553,7 +553,7 @@ class MainWindow(QtWidgets.QMainWindow):
             lambda: self._switch_canvas_mode(
                 edit=False, create_mode="ai_points_to_shape"
             ),
-            None,
+            shortcuts["ai_points_to_shape"],
             "ai-points.svg",
             self.tr("Click points to segment object. Ctrl+LeftClick ends creation."),
             enabled=False,
@@ -561,7 +561,7 @@ class MainWindow(QtWidgets.QMainWindow):
         create_ai_box_to_shape_mode = action(
             self.tr("AI-Box"),
             lambda: self._switch_canvas_mode(edit=False, create_mode="ai_box_to_shape"),
-            None,
+            shortcuts["ai_box_to_shape"],
             "ai-box.svg",
             self.tr("Draw a bounding box to segment object."),
             enabled=False,
@@ -2479,6 +2479,7 @@ class MainWindow(QtWidgets.QMainWindow):
             fit_to_content=self._config["fit_to_content"],
             flags=self._config["label_flags"],
             label_history=label_history,
+            label_pattern=self._config["label_pattern"],
         )
 
     def _connect_persistent_actions(self) -> None:

@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 from PySide6 import QtCore
+from PySide6 import QtGui
 from PySide6 import QtWidgets
 from pytestqt.qtbot import QtBot
 
@@ -26,6 +27,7 @@ def _make_dialog(
     completion: str = "startswith",
     fit_to_content: dict[str, bool] | None = None,
     flags: dict[str, list[str]] | None = None,
+    label_pattern: str | None = None,
 ) -> LabelDialog:
     dialog = LabelDialog(
         text=text,
@@ -35,6 +37,7 @@ def _make_dialog(
         completion=completion,
         fit_to_content=fit_to_content,
         flags=flags,
+        label_pattern=label_pattern,
     )
     qtbot.addWidget(dialog)
     return dialog
@@ -355,6 +358,16 @@ def test_ok_accepts_when_edit_disabled_even_if_empty(qtbot: QtBot) -> None:
     dialog.edit.setEnabled(False)
     _ok_button(dialog).click()
     assert dialog.result() == QtWidgets.QDialog.DialogCode.Accepted
+
+
+def test_label_pattern_restricts_typed_text(qtbot: QtBot) -> None:
+    dialog = _make_dialog(qtbot, label_pattern=r"^(1[0-9]|[2-4][0-9]|50)$")
+    validator = dialog.edit.validator()
+    assert validator is not None
+    state, _, _ = validator.validate("60", 2)  # ty: ignore[not-iterable]
+    assert state == QtGui.QValidator.State.Invalid
+    state, _, _ = validator.validate("25", 2)  # ty: ignore[not-iterable]
+    assert state == QtGui.QValidator.State.Acceptable
 
 
 def test_double_click_label_accepts(qtbot: QtBot) -> None:

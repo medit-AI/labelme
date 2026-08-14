@@ -50,6 +50,7 @@ class LabelDialog(QtWidgets.QDialog):
         fit_to_content: dict[str, bool] | None = None,
         flags: dict[str, list[str]] | None = None,
         label_history: list[str] | None = None,
+        label_pattern: str | None = None,
     ) -> None:
         super().__init__(parent)
 
@@ -70,15 +71,17 @@ class LabelDialog(QtWidgets.QDialog):
             fit_to_content = {"row": False, "column": True}
         self._fit_to_content = fit_to_content
 
+        
         # Build widgets
         self.edit = LabelQLineEdit()
         self.edit.setPlaceholderText(text)
-        self.edit.setValidator(label_validator())
+        self.edit.setValidator(label_validator(pattern=label_pattern))
 
+        universial_pattern = r"^(?:[1-9]|[12][0-9]|3[0-2]|[A-T])$"
         self.edit_group_id = QtWidgets.QLineEdit()
         self.edit_group_id.setPlaceholderText(_GROUP_ID_PLACEHOLDER)
         self.edit_group_id.setValidator(
-            QtGui.QRegularExpressionValidator(QtCore.QRegularExpression(r"[0-9]*"))
+            QtGui.QRegularExpressionValidator(QtCore.QRegularExpression(universial_pattern))
         )
 
         self.edit_description = QtWidgets.QTextEdit()
@@ -204,8 +207,17 @@ class LabelDialog(QtWidgets.QDialog):
         self._on_ok_clicked()
 
     def _on_ok_clicked(self) -> None:
-        if not self.edit.isEnabled() or self.edit.text().strip():
+        if not self.edit.isEnabled():
             self.accept()
+            return
+        # Per-keystroke validation only ever blocks the insertion that would
+        # produce an invalid result; text set programmatically (e.g. history
+        # selection) or committed in one shot (e.g. IME/paste on a fast type)
+        # never runs through the validator at all, so re-check here before
+        # letting an out-of-pattern label through on OK/double-click/Enter.
+        if not self.edit.text().strip() or not self.edit.hasAcceptableInput():
+            return
+        self.accept()
 
     def _clear_flag_checkboxes(self) -> None:
         self._flag_checkboxes.clear()

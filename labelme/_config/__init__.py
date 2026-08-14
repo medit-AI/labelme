@@ -53,6 +53,18 @@ def _update_dict(
 def _validate_config_item(key: str, value: object) -> None:
     if key == "validate_label" and value not in [None, "exact"]:
         raise ValueError(f"Unexpected value for config key 'validate_label': {value}")
+    if key == "label_pattern" and value is not None:
+        if not isinstance(value, str):
+            raise ValueError(
+                f"Config key 'label_pattern' must be a string, "
+                f"but got {type(value).__name__}: {value!r}"
+            )
+        try:
+            re.compile(value)
+        except re.error as e:
+            raise ValueError(
+                f"Invalid regex for config key 'label_pattern': {value!r} ({e})"
+            )
     if key == "labels" and value is not None:
         if not isinstance(value, list):
             raise ValueError(

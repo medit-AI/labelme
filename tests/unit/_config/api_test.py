@@ -290,6 +290,14 @@ def test_migrate_keep_prev_brightness_contrast(
             {"shortcuts": {"not_a_real_shortcut": "Ctrl+Z"}},
             "Unexpected key in config: not_a_real_shortcut",
         ),
+        (
+            {"label_pattern": "[unterminated"},
+            "Invalid regex for config key 'label_pattern'",
+        ),
+        (
+            {"label_pattern": 123},
+            "Config key 'label_pattern' must be a string, but got int",
+        ),
     ],
     ids=[
         "validate_label",
@@ -298,6 +306,8 @@ def test_migrate_keep_prev_brightness_contrast(
         "labels_not_a_list",
         "unknown_key",
         "unknown_key_nested",
+        "label_pattern_invalid_regex",
+        "label_pattern_not_a_string",
     ],
 )
 def test_load_config_rejects_invalid_override(overrides: dict, message: str) -> None:
@@ -312,6 +322,14 @@ def test_load_config_requires_labels_when_validate_label_enabled() -> None:
         _config.load_config(
             config_file=None, config_overrides={"validate_label": "exact"}
         )
+
+
+def test_load_config_accepts_valid_label_pattern() -> None:
+    pattern = r"^(1[0-9]|[2-4][0-9]|50)$"
+    config = _config.load_config(
+        config_file=None, config_overrides={"label_pattern": pattern}
+    )
+    assert config["label_pattern"] == pattern
 
 
 @pytest.mark.parametrize(
