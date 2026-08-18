@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-
+import tqdm
+import base64
+import os
 import argparse
 import collections
 import datetime
@@ -8,9 +10,9 @@ import math
 import sys
 import uuid
 from pathlib import Path
-from pathlib import PureWindowsPath
 from typing import Any
 from typing import Final
+from typing import List
 
 import imgviz
 import numpy as np
@@ -52,6 +54,27 @@ def _circle_to_polygon_segmentation(
     coords[:, 0] = cx + radius * np.cos(angles)
     coords[:, 1] = cy + radius * np.sin(angles)
     return coords.flatten().tolist()
+
+def deep_search_files(basepath, exts=[]) -> List[str]:
+    """
+    파일 딥 서치
+    Parameters
+    ----------
+    basepath :
+    exts :
+
+    Returns
+    -------
+
+    """
+    searched = []
+
+    for root, dirs, files in os.walk(basepath):
+        for ext in exts:
+            file_pathes = [os.path.join(root, file) for file in files if isinstance(ext, str) and file.endswith(ext)]
+            searched.extend(file_pathes)
+    return searched
+
 
 
 def main() -> None:
@@ -229,66 +252,123 @@ def main() -> None:
 _IMAGE_EXTS: Final = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
 
-def _find_labelme_pairs(input_dirs: list[str | Path]) -> list[Path]:
-    """Recursively search input_dirs for labelme .json files that have a
-    matching image saved next to them in the same folder, and return the
-    json paths that have one.
+def _find_image_for_json(json_path: Path) -> Path | None:
+    """Find the image saved next to json_path under the labelme convention:
+    identical filename, common raster extension, case-insensitive (real
+    datasets mix .png/.PNG etc). The json's own imagePath field is ignored on
+    purpose -- it easily goes stale once a dataset is copied to another
+    drive/machine (e.g. into a synced Dropbox folder).
     """
-    pairs: list[Path] = []
+    for candidate in json_path.parent.iterdir():
+        if candidate.stem == json_path.stem and candidate.suffix.lower() in _IMAGE_EXTS:
+            return candidate
+    return None
+
+
+def _load_pair(json_path: Path, image_path: Path) -> utils.LabeledImage:
+    with open(json_path, encoding="utf-8") as f:
+        data = json.load(f)
+    if data.get("imageData") is not None:
+        image_data = base64.b64decode(data["imageData"])
+    else:
+        # Many datasets are saved without embedded imageData to save space,
+        # so fall back to the image file actually matched on disk.
+        image_data = image_path.read_bytes()
+    shapes = [
+        {
+            "label": shape["label"],
+            "points": shape["points"],
+            "shape_type": shape.get("shape_type") or "polygon",
+            "group_id": shape.get("group_id"),
+            "flags": shape.get("flags") or {},
+        }
+        for shape in data["shapes"]
+    ]
+    return utils.LabeledImage(image_data=image_data, shapes=shapes)
+
+
+def _find_labelme_pairs(
+    input_dirs: str | Path | list[str | Path],
+) -> list[tuple[Path, Path]]:
+    """Deep-search input_dirs for labelme .json files that have an image of
+    the identical filename saved in the same folder, and return (json_path,
+    image_path) for every pair found.
+    """
+    if isinstance(input_dirs, (str, Path)):
+        input_dirs = [input_dirs]
+
+    pairs: list[tuple[Path, Path]] = []
     seen: set[Path] = set()
     for input_dir in input_dirs:
-        for json_path in sorted(Path(input_dir).rglob("*.json")):
+        json_paths = deep_search_files(basepath=str(input_dir), exts=[".json"])
+        for json_path in sorted(Path(p) for p in json_paths):
             if json_path in seen:
                 continue
             seen.add(json_path)
 
-            with open(json_path, encoding="utf-8") as f:
-                data = json.load(f)
-
-            image_path = None
-            image_path_value = data.get("imagePath")
-            if image_path_value:
-                candidate = json_path.parent / PureWindowsPath(image_path_value).as_posix()
-                if candidate.exists():
-                    image_path = candidate
-            if image_path is None:
-                for ext in _IMAGE_EXTS:
-                    candidate = json_path.with_suffix(ext)
-                    if candidate.exists():
-                        image_path = candidate
-                        break
-
+            image_path = _find_image_for_json(json_path)
             if image_path is None:
                 print(f"Skipping {json_path}: no matching image found next to it")
                 continue
-            pairs.append(json_path)
+            pairs.append((json_path, image_path))
     return pairs
 
 
 def convert_labelme_dirs_to_coco(
-    input_dirs: list[str | Path],
+    input_dirs: str | Path | list[str | Path],
     output_dir: str | Path,
-    labels_file: str | Path,
+    labels_file: str | Path | None = None,
     noviz: bool = False,
 ) -> Path:
-    """Deep-search input_dirs for labelme json/image pairs (saved together in
-    the same folder) and convert every pair found into one COCO dataset.
+    """Deep-search input_dirs for labelme image/json pairs (image and .json
+    saved together under the same filename) and convert every pair found
+    into one COCO dataset.
 
-    This mirrors main()'s per-file conversion, generalized to multiple input
-    roots and recursive (sub-folder) discovery instead of a single flat
-    directory.
+    labels_file is optional. Without it, the category list is collected
+    straight from the labels already present in the discovered jsons'
+    shapes -- labelme output has no separate text label list to convert,
+    it's already all in the json.
     """
     output_dir = Path(output_dir)
-    if output_dir.exists():
-        raise FileExistsError(f"Output directory already exists: {output_dir}")
-    output_dir.mkdir(parents=True)
-    (output_dir / "JPEGImages").mkdir(parents=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "JPEGImages").mkdir(parents=True, exist_ok=True)
     if not noviz:
-        (output_dir / "Visualization").mkdir(parents=True)
+        (output_dir / "Visualization").mkdir(parents=True, exist_ok=True)
     print("Creating dataset:", output_dir)
 
-    label_files = _find_labelme_pairs(input_dirs=input_dirs)
-    print(f"Found {len(label_files)} labelme json/image pairs")
+    pairs = _find_labelme_pairs(input_dirs=input_dirs)
+    print(f"Found {len(pairs)} labelme image/json pairs")
+
+    loaded = [
+        (json_path, image_path, _load_pair(json_path, image_path))
+        for json_path, image_path in pairs
+    ]
+
+    if labels_file is not None:
+        class_name_to_id = {}
+        for i, line in enumerate(open(labels_file).readlines()):
+            class_id = i - 1  # starts with -1
+            class_name = line.strip()
+            if class_id == -1:
+                assert class_name == "__ignore__"
+                continue
+            class_name_to_id[class_name] = class_id
+    else:
+        label_names = sorted(
+            {shape["label"] for _, _, label_file in loaded for shape in label_file.shapes}
+        )
+        digit_class_max = 1000
+        class_name_to_id = dict()
+        for i, name in enumerate(label_names):
+            if name.isdigit():
+                class_name_to_id[name] = int(name)
+            else:
+                class_name_to_id[name] = digit_class_max + i
+                
+            
+            
+            # class_name_to_id = {name: i for i, name in enumerate(label_names)}
+        # class_name_to_id = {name: i for i, name in enumerate(label_names)}
 
     now = datetime.datetime.now()
     data: dict[str, Any] = dict(
@@ -304,35 +384,23 @@ def convert_labelme_dirs_to_coco(
         type="instances",
     )
     data["images"] = []
-    data["categories"] = []
+    data["categories"] = [
+        dict(supercategory=None, id=class_id, name=class_name)
+        for class_name, class_id in class_name_to_id.items()
+    ]
     data["annotations"] = []
 
-    class_name_to_id = {}
-    for i, line in enumerate(open(labels_file).readlines()):
-        class_id = i - 1  # starts with -1
-        class_name = line.strip()
-        if class_id == -1:
-            assert class_name == "__ignore__"
-            continue
-        class_name_to_id[class_name] = class_id
-        data["categories"].append(
-            dict(
-                supercategory=None,
-                id=class_id,
-                name=class_name,
-            )
-        )
-
     out_ann_file = output_dir / "annotations.json"
-    for image_id, path in enumerate(label_files):
-        print("Generating dataset from:", path)
-
-        label_file = utils.load_label_file(str(path))
+    test_break = 10
+    for image_id, (json_path, image_path, label_file) in tqdm.tqdm(enumerate(loaded)):
+        # if image_id >= test_break:
+            # break
+        print("Generating dataset from:", json_path)
 
         # Different input_dirs can contain same-named files in different
         # sub-folders, so the output name is disambiguated with image_id
-        # instead of reusing path.stem alone.
-        base = f"{image_id:06d}_{path.stem}"
+        # instead of reusing the stem alone.
+        base = f"{image_id:06d}_{image_path.stem}"
         out_img_file = output_dir / "JPEGImages" / f"{base}.jpg"
 
         img = utils.img_data_to_arr(label_file.image_data)
@@ -439,4 +507,9 @@ def convert_labelme_dirs_to_coco(
 
 
 if __name__ == "__main__":
-    main()
+    # main()
+    convert_labelme_dirs_to_coco(
+        "E:/dataset/Medit_AI Dropbox/Medit_AI Dropbox/Medit_AI/xray_panoramic/cbct_ios_dcm",
+        "E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm",
+        labels_file=None,
+    )
