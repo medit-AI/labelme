@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from .._ai_models import supports_point_prompts
 from .._shape import Shape
+from ._geometry import PolygonSimplification
 from ._geometry import _round_bbox_to_int
 from ._osam_session import OsamSession
 from ._shape_builders import Detection
@@ -28,6 +29,8 @@ class AiAssistProposal:
 class AiAssistSession:
     model_name: str
     output_format: AiOutputFormat
+    # None keeps the default size-relative polygon approximation.
+    polygon_simplification: PolygonSimplification | None
     _session: OsamSession | None
 
     def __init__(
@@ -37,6 +40,7 @@ class AiAssistSession:
     ) -> None:
         self.model_name = model_name
         self.output_format = output_format
+        self.polygon_simplification = None
         self._session = None
 
     def _get_session(self) -> OsamSession:
@@ -94,9 +98,44 @@ class AiAssistSession:
             new_shapes=shapes_from_detections(
                 detections=matches.new_detections,
                 shape_type=self.output_format,
+                polygon_simplification=self.polygon_simplification,
+                image=image,
             ),
             matching_existing_shapes=matches.matching_shapes,
         )
+
+
+    def segment_box_to_polygon(
+        self,
+        *,
+        image: NDArray[np.uint8],
+        image_id: str,
+        box_xyxy: tuple[float, float, float, float],
+        polygon_simplification: PolygonSimplification | None,
+    ) -> Shape | None:
+        """Segment the region in box_xyxy with SAM and return it as a polygon.
+
+        Unlike propose_shapes, this ignores output_format and existing-shape
+        suppression: it re-segments a shape that already exists.
+        """
+        xmin, ymin, xmax, ymax = box_xyxy
+        response = self._get_session().run(
+            image=image,
+            image_id=image_id,
+            points=np.array([[xmin, ymin], [xmax, ymax]], dtype=np.float32),
+            # 2=box corner, 3=opposite box corner (SAM convention)
+            point_labels=np.array([2, 3]),
+        )
+        detections = _detections_from_annotations(response.annotations)
+        if not detections:
+            return None
+        shapes = shapes_from_detections(
+            detections=detections[:1],  # sorted by score, best first
+            shape_type="polygon",
+            polygon_simplification=polygon_simplification,
+            image=image,
+        )
+        return shapes[0] if shapes else None
 
 
 def _count_satisfied_prompt_points(

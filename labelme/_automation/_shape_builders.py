@@ -10,10 +10,13 @@ from numpy.typing import NDArray
 
 from .._shape import Shape
 from ._geometry import Circle
+from ._geometry import PolygonSimplification
 from ._geometry import _round_bbox_to_int
 from ._geometry import compute_circle_from_mask
 from ._geometry import compute_oriented_rectangle_from_mask
 from ._geometry import compute_polygon_from_mask
+from ._geometry import postprocess_mask
+from ._geometry import snap_vertices_to_edges
 from ._types import AiOutputFormat
 
 
@@ -47,6 +50,8 @@ def _build_shape(
 def _shape_from_detection(
     detection: Detection,
     shape_type: AiOutputFormat,
+    polygon_simplification: PolygonSimplification | None = None,
+    image: NDArray[np.uint8] | None = None,
 ) -> Shape | None:
     if shape_type == "rectangle":
         if detection.bbox is None:
@@ -61,11 +66,30 @@ def _shape_from_detection(
     if shape_type == "polygon":
         if detection.mask is None:
             return None
-        polygon = compute_polygon_from_mask(mask=detection.mask)
-        if detection.bbox is not None:
-            polygon = polygon + np.array(
-                [detection.bbox[0], detection.bbox[1]], dtype=np.float32
+        mask = detection.mask
+        origin = (
+            np.array([detection.bbox[0], detection.bbox[1]], dtype=np.float64)
+            if detection.bbox is not None
+            else np.zeros(2, dtype=np.float64)
+        )
+        if polygon_simplification is not None:
+            mask, origin = postprocess_mask(
+                mask,
+                origin_xy=origin,
+                image=image,
+                simplification=polygon_simplification,
             )
+        polygon = (
+            compute_polygon_from_mask(mask=mask, simplification=polygon_simplification)
+            + origin
+        )
+        if image is not None:
+            if polygon_simplification is not None:
+                polygon = snap_vertices_to_edges(
+                    polygon, image, radius=polygon_simplification.snap_radius
+                )
+            # Refinement and snapping may move vertices past the image edge.
+            polygon = np.clip(polygon, (0, 0), (image.shape[1], image.shape[0]))
         if len(polygon) < 3:
             return None
         return _build_shape(
@@ -169,10 +193,17 @@ MASK_REQUIRED_SHAPE_TYPES: Final[frozenset[AiOutputFormat]] = frozenset(
 def shapes_from_detections(
     detections: list[Detection],
     shape_type: AiOutputFormat,
+    polygon_simplification: PolygonSimplification | None = None,
+    image: NDArray[np.uint8] | None = None,
 ) -> list[Shape]:
     shapes: list[Shape] = []
     for detection in detections:
-        shape = _shape_from_detection(detection=detection, shape_type=shape_type)
+        shape = _shape_from_detection(
+            detection=detection,
+            shape_type=shape_type,
+            polygon_simplification=polygon_simplification,
+            image=image,
+        )
         if shape is not None:
             shapes.append(shape)
     return shapes

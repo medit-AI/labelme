@@ -7,8 +7,11 @@ import collections
 import datetime
 import json
 import math
+import random
 import sys
+import types
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from typing import Final
@@ -314,26 +317,57 @@ def _find_labelme_pairs(
     return pairs
 
 
+_DEFAULT_SPLITS: Final = types.MappingProxyType({"train": 0.9, "valid": 0.1})
+
+
+def _split_counts(total: int, weights: Mapping[str, float]) -> dict[str, int]:
+    """Split total items by weights (any positive scale, need not sum to 1).
+
+    Largest-remainder rounding, so the counts always add up to total exactly.
+    """
+    if not weights or any(w < 0 for w in weights.values()):
+        raise ValueError(f"split weights must be non-negative: {dict(weights)}")
+    weight_sum = sum(weights.values())
+    if weight_sum <= 0:
+        raise ValueError(f"split weights must not all be zero: {dict(weights)}")
+    exact = {name: total * w / weight_sum for name, w in weights.items()}
+    counts = {name: math.floor(value) for name, value in exact.items()}
+    by_remainder = sorted(exact, key=lambda name: exact[name] - counts[name], reverse=True)
+    for name in by_remainder[: total - sum(counts.values())]:
+        counts[name] += 1
+    return counts
+
+
 def convert_labelme_dirs_to_coco(
     input_dirs: str | Path | list[str | Path],
     output_dir: str | Path,
     labels_file: str | Path | None = None,
     noviz: bool = False,
-) -> Path:
+    color_map: str | None = None,
+    splits: Mapping[str, float] | None = _DEFAULT_SPLITS,
+    seed: int = 0,
+) -> dict[str, Path]:
     """Deep-search input_dirs for labelme image/json pairs (image and .json
     saved together under the same filename) and convert every pair found
-    into one COCO dataset.
+    into COCO datasets.
 
     labels_file is optional. Without it, the category list is collected
     straight from the labels already present in the discovered jsons'
     shapes -- labelme output has no separate text label list to convert,
     it's already all in the json.
+
+    splits maps a split name to its weight, e.g. {"train": 0.8, "valid": 0.1,
+    "test": 0.1}. The pairs are shuffled with seed and divided by those
+    weights, and each split is saved as its own COCO dataset under
+    output_dir/<split name>/ (JPEGImages, Visualization, annotations.json),
+    all sharing the same categories. output_dir/splits.json records which
+    source json went to which split. splits=None writes a single dataset
+    directly into output_dir, as before.
+
+    Returns the annotations.json path of each split (key "all" for None).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "JPEGImages").mkdir(parents=True, exist_ok=True)
-    if not noviz:
-        (output_dir / "Visualization").mkdir(parents=True, exist_ok=True)
     print("Creating dataset:", output_dir)
 
     pairs = _find_labelme_pairs(input_dirs=input_dirs)
@@ -366,9 +400,69 @@ def convert_labelme_dirs_to_coco(
                 class_name_to_id[name] = digit_class_max + i
                 
             
-            
+    color_map_table = get_teeth_color_table(normalize=False, dark_mode=True, DARK_1ST = .25) if color_map  == 'teeth' else None
+
             # class_name_to_id = {name: i for i, name in enumerate(label_names)}
         # class_name_to_id = {name: i for i, name in enumerate(label_names)}
+
+    if splits is None:
+        out_ann_file = _write_coco_dataset(
+            loaded,
+            output_dir=output_dir,
+            class_name_to_id=class_name_to_id,
+            noviz=noviz,
+            color_map_table=color_map_table,
+        )
+        return {"all": out_ann_file}
+
+    # Shuffle a copy with a fixed seed so the same inputs always give the same
+    # split, independent of the order the files were found in.
+    shuffled = list(loaded)
+    random.Random(seed).shuffle(shuffled)
+    counts = _split_counts(total=len(shuffled), weights=splits)
+
+    out_ann_files: dict[str, Path] = {}
+    manifest: dict[str, list[str]] = {}
+    start = 0
+    for split_name, count in counts.items():
+        split_items = shuffled[start : start + count]
+        start += count
+        print(f"Split {split_name!r}: {count} pairs")
+        manifest[split_name] = [str(json_path) for json_path, _, _ in split_items]
+        out_ann_files[split_name] = _write_coco_dataset(
+            split_items,
+            output_dir=output_dir / split_name,
+            class_name_to_id=class_name_to_id,
+            noviz=noviz,
+            color_map_table=color_map_table,
+        )
+
+    manifest_file = output_dir / "splits.json"
+    with open(manifest_file, "w", encoding="utf-8") as f:
+        json.dump(
+            dict(seed=seed, weights=dict(splits), counts=counts, files=manifest),
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    print("Saved split manifest to:", manifest_file)
+    return out_ann_files
+
+
+def _write_coco_dataset(
+    items: list[tuple[Path, Path, utils.LabeledImage]],
+    output_dir: Path,
+    class_name_to_id: dict[str, int],
+    noviz: bool,
+    color_map_table: np.ndarray | None,
+) -> Path:
+    """Convert (json_path, image_path, label_file) items into one COCO dataset
+    under output_dir: JPEGImages/, Visualization/ and annotations.json.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "JPEGImages").mkdir(parents=True, exist_ok=True)
+    if not noviz:
+        (output_dir / "Visualization").mkdir(parents=True, exist_ok=True)
 
     now = datetime.datetime.now()
     data: dict[str, Any] = dict(
@@ -392,7 +486,9 @@ def convert_labelme_dirs_to_coco(
 
     out_ann_file = output_dir / "annotations.json"
     test_break = 10
-    for image_id, (json_path, image_path, label_file) in tqdm.tqdm(enumerate(loaded)):
+    for image_id, (json_path, image_path, label_file) in tqdm.tqdm(
+        enumerate(items), total=len(items)
+    ):
         # if image_id >= test_break:
             # break
         print("Generating dataset from:", json_path)
@@ -495,6 +591,7 @@ def convert_labelme_dirs_to_coco(
                     captions=captions,
                     font_size=15,
                     line_width=2,
+                    colormap=color_map_table,
                 )
             out_viz_file = output_dir / "Visualization" / f"{base}.jpg"
             imgviz.io.imsave(out_viz_file, viz)
@@ -505,11 +602,77 @@ def convert_labelme_dirs_to_coco(
     print("Saved annotations to:", out_ann_file)
     return out_ann_file
 
+    
+def get_teeth_color_table(normalize=False, dark_mode=True, DARK_1ST = .25, as_fdi=False):
+    """
+    https://github.com/tensorflow/models/blob/master/research/deeplab/utils/get_dataset_colormap.py
+    """
+    color_table = np.asarray([
+        [255, 255, 255],  # bg
+        [6, 230, 230],  # 1
+        [80, 50, 50],  # 2
+        [4, 200, 3],  # 3
+        [30, 20, 240],  # 4
+        [240, 10, 7],  # 5
+        [224, 5, 255],  # 6
+        [235, 255, 7],  # 7
+        [150, 5, 61],  # 8
+        [120, 120, 70],
+        [8, 255, 51],
+        [255, 6, 82],
+        [143, 255, 140],
+    ])
+
+    if dark_mode:
+        norm_color_table = color_table / 255.0
+        color_table2 = np.concatenate([norm_color_table[:10] for _ in range(5)], axis=0)
+
+        norm_fdi0_color = norm_color_table[1:9]
+        color_table2[np.arange(1, 9)] = norm_fdi0_color
+
+        color_table2[np.arange(11, 19)] = norm_fdi0_color
+        color_table2[np.arange(21, 29)] = (norm_fdi0_color - DARK_1ST).clip(0, 1)
+        color_table2[np.arange(31, 39)] = (norm_fdi0_color - DARK_1ST).clip(0, 1)
+        color_table2[np.arange(41, 49)] = norm_fdi0_color
+
+        color_table = (color_table2 * 255).astype(np.uint8)
+    if normalize:
+        color_table = color_table / 255.
+    else:
+        color_table = color_table.astype(np.uint8)
+        
+    if as_fdi:
+        pass
+    else:
+        universal_to_fdi = np.array([
+            0,  # Index 0
+            18, 17, 16, 15, 14, 13, 12, 11,  # 1~8 (우상)
+            21, 22, 23, 24, 25, 26, 27, 28,  # 9~16 (좌상)
+            38, 37, 36, 35, 34, 33, 32, 31,  # 17~24 (좌하)
+            41, 42, 43, 44, 45, 46, 47, 48   # 25~32 (우하)
+        ])
+        
+        universal = np.arange(33)
+        fdis = universal_to_fdi[universal]
+        # color_table = color_table[fdis]
+        # new_color_table = np.zeros_like(color_table)
+        # new_color_table[universal] = color_table[fdis]
+        # fdi_colors[]
+        universal_colors = color_table[fdis]
+        
+        
+        # replcce
+        color_table = universal_colors
+    # return color_table[..., ::-1]
+    return color_table
+
 
 if __name__ == "__main__":
     # main()
     convert_labelme_dirs_to_coco(
         "E:/dataset/Medit_AI Dropbox/Medit_AI Dropbox/Medit_AI/xray_panoramic/cbct_ios_dcm",
-        "E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm",
+        "E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm_latest_0824",
         labels_file=None,
+        color_map='teeth',
+        
     )

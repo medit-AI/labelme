@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import enum
 import functools
 import json
@@ -56,10 +57,13 @@ from ._widgets import LabelDialog
 from ._widgets import LabelListWidget
 from ._widgets import LabelListWidgetItem
 from ._widgets import Palette
+from ._widgets import PolygonSimplifyDialog
+from ._widgets import PolygonSimplifyWidget
 from ._widgets import SettingsDialog
 from ._widgets import StatusStats
 from ._widgets import ToolBar
 from ._widgets import UniqueLabelQListWidget
+from ._widgets import ViewMode
 from ._widgets import ZoomWidget
 from ._widgets import download_ai_model
 from ._widgets import format_shape_label
@@ -151,6 +155,9 @@ class _Actions(NamedTuple):
     hide_all: QtGui.QAction
     show_all: QtGui.QAction
     toggle_all: QtGui.QAction
+    toggle_view_mode: QtGui.QAction
+    toggle_polygon_simplify: QtGui.QAction
+    simplify_selected: QtGui.QAction
     open_dir: QtGui.QAction
     zoom_widget_action: QtWidgets.QWidgetAction
     draw: list[tuple[str, QtGui.QAction]]
@@ -264,6 +271,19 @@ class MainWindow(QtWidgets.QMainWindow):
             on_submit=self._submit_ai_prompt, parent=self
         )
         self._ai_text.setEnabled(False)
+
+        simplify_config = self._config["ai"]["polygon_simplification"]
+        self._polygon_simplify = PolygonSimplifyWidget(
+            enabled=simplify_config["enabled"], parent=self
+        )
+        self._polygon_simplify.enabled_changed.connect(
+            self._on_polygon_simplify_enabled_changed
+        )
+        self._polygon_simplify.options_requested.connect(
+            self._open_polygon_simplify_options
+        )
+        self._polygon_simplify_dialog: PolygonSimplifyDialog | None = None
+        self._sync_polygon_simplification()
 
         self._setup_toolbars()
 
@@ -677,6 +697,40 @@ class MainWindow(QtWidgets.QMainWindow):
             tip=self.tr("Toggle all shapes"),
             enabled=False,
         )
+        toggle_view_mode = action(
+            self.tr("&View\nMode"),
+            self._cycle_view_mode,
+            shortcuts["toggle_view_mode"],
+            icon="phosphor/eye.svg",
+            tip=self.tr(
+                "Cycle the canvas view: polygons (editing) -> translucent "
+                "label-color masks -> image only (both read-only)"
+            ),
+            checkable=True,
+            enabled=False,
+        )
+        self._canvas_widgets.canvas.set_view_mode_alpha(
+            self._config["canvas"]["view_mode_alpha"]
+        )
+        toggle_polygon_simplify = action(
+            self.tr("Polygon Simplify (AI)"),
+            self._on_polygon_simplify_enabled_changed,
+            shortcuts["toggle_polygon_simplify"],
+            tip=self.tr(
+                "Merge, refine, smooth and simplify polygons produced by AI modes"
+            ),
+            checkable=True,
+            checked=self._config["ai"]["polygon_simplification"]["enabled"],
+        )
+        simplify_selected = action(
+            self.tr("Simplify Selected Polygons"),
+            self._simplify_selected_polygons,
+            shortcuts["simplify_selected_polygons"],
+            tip=self.tr(
+                "Run the selected polygons through Polygon Simplify with the "
+                "current options"
+            ),
+        )
 
         zoom_widget_action = QtWidgets.QWidgetAction(self)
         zoom_box_layout = QtWidgets.QVBoxLayout()
@@ -728,8 +782,9 @@ class MainWindow(QtWidgets.QMainWindow):
             create_ai_points_to_shape_mode,
             create_ai_box_to_shape_mode,
             brightness_contrast,
+            toggle_view_mode,
         )
-        on_shapes_present = (save_as, hide_all, show_all, toggle_all)
+        on_shapes_present =(save_as, hide_all, show_all, toggle_all)
         context_menu = (
             *[draw_action for _, draw_action in draw],
             edit_mode,
@@ -756,6 +811,9 @@ class MainWindow(QtWidgets.QMainWindow):
             remove_point,
             None,
             keep_prev_action,
+            None,
+            toggle_polygon_simplify,
+            simplify_selected,
         )
         return _Actions(
             about=about,
@@ -802,6 +860,9 @@ class MainWindow(QtWidgets.QMainWindow):
             hide_all=hide_all,
             show_all=show_all,
             toggle_all=toggle_all,
+            toggle_view_mode=toggle_view_mode,
+            toggle_polygon_simplify=toggle_polygon_simplify,
+            simplify_selected=simplify_selected,
             open_dir=open_dir,
             zoom_widget_action=zoom_widget_action,
             draw=draw,
@@ -893,6 +954,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._actions.hide_all,
                 self._actions.show_all,
                 self._actions.toggle_all,
+                self._actions.toggle_view_mode,
                 None,
                 self._actions.zoom_in,
                 self._actions.zoom_out,
@@ -934,6 +996,9 @@ class MainWindow(QtWidgets.QMainWindow):
         ai_prompt_action = QtWidgets.QWidgetAction(self)
         ai_prompt_action.setDefaultWidget(self._ai_text)
 
+        polygon_simplify_action = QtWidgets.QWidgetAction(self)
+        polygon_simplify_action.setDefaultWidget(self._polygon_simplify)
+
         self.addToolBar(
             Qt.ToolBarArea.TopToolBarArea,
             ToolBar(
@@ -956,6 +1021,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._actions.zoom_widget_action,
                     None,
                     select_ai_model,
+                    polygon_simplify_action,
                     None,
                     ai_prompt_action,
                 ],
@@ -1358,10 +1424,11 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             self._text_osam_session = _automation.OsamSession(model_name=model_name)
 
+        image = _utils.img_qt_to_arr(self._image)[:, :, :3]
         try:
             boxes, scores, labels, masks = _automation.get_bboxes_from_texts(
                 session=self._text_osam_session,
-                image=_utils.img_qt_to_arr(self._image)[:, :, :3],
+                image=image,
                 image_id=str(hash(self._image_path)),
                 texts=texts,
             )
@@ -1441,7 +1508,10 @@ class MainWindow(QtWidgets.QMainWindow):
             iou_threshold=self._ai_text.get_iou_threshold(),
         )
         shapes: list[Shape] = _automation.shapes_from_detections(
-            detections=detections, shape_type=shape_type
+            detections=detections,
+            shape_type=shape_type,
+            polygon_simplification=self._active_polygon_simplification(),
+            image=image,
         )
 
         self._canvas_widgets.canvas.backup_shapes()
@@ -1478,6 +1548,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _switch_canvas_mode(
         self, edit: bool = True, create_mode: str | None = None
     ) -> None:
+        # Picking an edit/create tool means the user wants to annotate again.
+        self._set_view_mode("off")
         self._canvas_widgets.canvas.set_editing(edit)
         if create_mode is not None:
             self._canvas_widgets.canvas.create_mode = create_mode
@@ -1499,6 +1571,185 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._ai_annotation.setEnabled(not edit and create_mode in _AI_CREATE_MODES)
         self._set_point_prompt_mode(enabled=create_mode == "ai_points_to_shape")
+
+    def _polygon_simplification_params(self) -> _automation.PolygonSimplification:
+        config = self._config["ai"]["polygon_simplification"]
+        names = {f.name for f in dataclasses.fields(_automation.PolygonSimplification)}
+        return _automation.PolygonSimplification(
+            **{key: value for key, value in config.items() if key in names}
+        )
+
+    def _active_polygon_simplification(
+        self,
+    ) -> _automation.PolygonSimplification | None:
+        if not self._config["ai"]["polygon_simplification"]["enabled"]:
+            return None
+        return self._polygon_simplification_params()
+
+    def _sync_polygon_simplification(self) -> None:
+        self._canvas_widgets.canvas.set_ai_polygon_simplification(
+            self._active_polygon_simplification()
+        )
+
+    def _persist_polygon_simplification(self, values: dict[str, object]) -> None:
+        overrides = [
+            (("ai", "polygon_simplification", key), value)
+            for key, value in values.items()
+        ]
+        # Not routed through _apply_setting_change: these keys have no editor in
+        # the Settings dialog, whose set_value would fail on them.
+        if self._is_settings_editable:
+            self._try_set_overrides(overrides=overrides)
+        for key_path, value in overrides:
+            self._set_setting_value(key_path=key_path, value=value)
+        self._sync_polygon_simplification()
+
+    def _on_polygon_simplify_enabled_changed(self, enabled: bool) -> None:
+        # The toolbar checkbox and the Edit menu action mirror each other.
+        with QtCore.QSignalBlocker(self._actions.toggle_polygon_simplify):
+            self._actions.toggle_polygon_simplify.setChecked(enabled)
+        self._polygon_simplify.set_enabled_checked(enabled)
+        self._persist_polygon_simplification({"enabled": enabled})
+        self.show_status_message(
+            self.tr("Polygon Simplify on")
+            if enabled
+            else self.tr("Polygon Simplify off"),
+            delay=2000,
+        )
+
+    def _open_polygon_simplify_options(self) -> None:
+        if self._polygon_simplify_dialog is None:
+            dialog = PolygonSimplifyDialog(
+                params=self._polygon_simplification_params(), parent=self
+            )
+            dialog.params_changed.connect(self._on_polygon_simplify_params_changed)
+            dialog.apply_to_selected_requested.connect(
+                self._simplify_selected_polygons
+            )
+            dialog.finished.connect(self._save_polygon_simplify_params)
+            # Window shortcuts only fire in the active window; register them on
+            # the dialog too so P / Shift+P keep working while it has focus.
+            dialog.addActions(
+                [
+                    self._actions.toggle_polygon_simplify,
+                    self._actions.simplify_selected,
+                ]
+            )
+            self._polygon_simplify_dialog = dialog
+        self._polygon_simplify_dialog.show()
+        self._polygon_simplify_dialog.raise_()
+        self._polygon_simplify_dialog.activateWindow()
+
+    def _on_polygon_simplify_params_changed(
+        self, params: _automation.PolygonSimplification
+    ) -> None:
+        # Apply live in memory; the config file is written once on dialog close.
+        self._config["ai"]["polygon_simplification"].update(dataclasses.asdict(params))
+        self._sync_polygon_simplification()
+
+    def _save_polygon_simplify_params(self) -> None:
+        self._persist_polygon_simplification(
+            dataclasses.asdict(self._polygon_simplification_params())
+        )
+
+    def _simplify_selected_polygons(self) -> None:
+        canvas = self._canvas_widgets.canvas
+        params = self._polygon_simplification_params()
+        image = (
+            None
+            if canvas.pixmap.isNull()
+            else _utils.img_qt_to_arr(img_qt=canvas.pixmap.toImage())[:, :, :3]
+        )
+        polygons = [
+            shape
+            for shape in canvas.selected_shapes
+            if shape.shape_type == "polygon" and len(shape.points) >= 3
+        ]
+        if params.resegment_with_sam and image is not None and polygons:
+            changed = self._resegment_polygons_with_sam(
+                polygons=polygons, image_size=(image.shape[1], image.shape[0])
+            )
+            done_message = self.tr("Re-segmented %d polygon(s) with SAM")
+        else:
+            changed = 0
+            for shape in polygons:
+                simplified = _automation.resimplify_polygon(
+                    shape.points, image=image, simplification=params
+                )
+                if np.array_equal(simplified, shape.points):
+                    continue
+                shape.points = simplified
+                changed += 1
+            done_message = self.tr("Simplified %d polygon(s)")
+        if changed == 0:
+            self.show_status_message(
+                self.tr("No selected polygon to simplify"), delay=3000
+            )
+            return
+        canvas.backup_shapes()
+        canvas.update()
+        self.mark_dirty()
+        self.show_status_message(done_message % changed, delay=3000)
+
+    def _resegment_polygons_with_sam(
+        self, polygons: list[Shape], image_size: tuple[int, int]
+    ) -> int:
+        canvas = self._canvas_widgets.canvas
+        model_name = canvas.get_ai_model_name()
+        if osam.apis.get_model_type_by_name(model_name).get_size() is None:
+            if not download_ai_model(model_name=model_name, parent=self):
+                return 0
+        params = self._polygon_simplification_params()
+        width, height = image_size
+        changed = 0
+        QtWidgets.QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            for shape in polygons:
+                (xmin, ymin), (xmax, ymax) = shape.points.min(0), shape.points.max(0)
+                # A little slack so SAM sees the whole object even when the
+                # existing polygon is slightly too tight.
+                pad = max(3.0, 0.05 * max(xmax - xmin, ymax - ymin))
+                box = (
+                    max(float(xmin) - pad, 0.0),
+                    max(float(ymin) - pad, 0.0),
+                    min(float(xmax) + pad, float(width)),
+                    min(float(ymax) + pad, float(height)),
+                )
+                try:
+                    resegmented = canvas.segment_box_with_ai(
+                        box_xyxy=box, polygon_simplification=params
+                    )
+                except Exception as e:
+                    logger.opt(exception=e).error("SAM re-segmentation failed")
+                    self._on_inference_failed(message=f"{type(e).__name__}: {e}")
+                    break
+                if resegmented is None:
+                    continue
+                shape.points = resegmented.points
+                changed += 1
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        return changed
+
+    def _cycle_view_mode(self) -> None:
+        order: tuple[ViewMode, ...] = ("off", "mask", "image")
+        current = self._canvas_widgets.canvas.view_mode
+        mode = order[(order.index(current) + 1) % len(order)]
+        self._set_view_mode(mode)
+        self.show_status_message(
+            {
+                "off": self.tr("View: polygons (editing)"),
+                "mask": self.tr("View: masks (read-only)"),
+                "image": self.tr("View: image only (read-only)"),
+            }[mode],
+            delay=2000,
+        )
+
+    def _set_view_mode(self, mode: ViewMode) -> None:
+        # Checked whenever a read-only view is active; triggering the action
+        # flips Qt's checked state, so always resync it to the real mode.
+        self._actions.toggle_view_mode.setChecked(mode != "off")
+        self._canvas_widgets.canvas.set_view_mode(mode)
 
     def _highlight_ai_buttons(self, highlight: bool) -> None:
         self._ai_buttons_highlighted = highlight

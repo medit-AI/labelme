@@ -94,6 +94,28 @@ shape:
 ai:
   default: Sam2 (balanced)
   suppress_existing_shape_matches: false
+  # smooth AI polygons, then thin them with Ramer-Douglas-Peucker
+  polygon_simplification:
+    enabled: true
+    # RDP tolerance in pixels (larger: fewer points)
+    epsilon: 2.0
+    # smoothing passes (0: no smoothing); reach ~ sqrt(iterations * (1 - weight)) px
+    smoothing_iterations: 30
+    # share each vertex keeps per pass (lower: smoother, 1.0: no smoothing)
+    smoothing_weight: 0.5
+    # closing radius in pixels fusing split mask fragments into one (0: off)
+    merge_radius: 5
+    # level-set boundary refinement: none, chan_vese (intensity), geodesic (edges)
+    refine_method: geodesic
+    refine_iterations: 15
+    # max pixels the refined boundary may move from the original mask
+    refine_band: 8
+    # final step: snap each vertex onto the strongest image edge within this
+    # many pixels along its normal (0: off)
+    snap_radius: 3.0
+    # Simplify Selected Polygons: re-run SAM on each polygon's bounding box
+    # (current AI model) instead of reshaping the existing outline
+    resegment_with_sam: false
 # main
 flag_dock:
   show: true
@@ -125,6 +147,8 @@ fit_to_content:
 epsilon: 10.0
 canvas:
   fill_drawing: true
+  # fill opacity (0-255) of shapes in view mode
+  view_mode_alpha: 128
   # None: do nothing
   # close: close polygon
   double_click: close
@@ -181,3 +205,6 @@ shortcuts:
   show_all_shapes:
   hide_all_shapes:
   toggle_all_shapes: T
+  toggle_view_mode: V
+  toggle_polygon_simplify: P
+  simplify_selected_polygons: Shift+P

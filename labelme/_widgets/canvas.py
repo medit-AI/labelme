@@ -37,6 +37,7 @@ from ._shape_render import VertexHighlight
 from ._shape_render import bounds as _shape_bounds
 from ._shape_render import is_hit_by_point
 from ._shape_render import render_shape
+from ._shape_render import render_shape_overlay
 from .download import download_ai_model
 
 _DEFAULT_SHAPE_RGB: Final[tuple[int, int, int]] = (0, 255, 0)
@@ -100,6 +101,8 @@ def _shape_to_draft(shape: Shape) -> _DraftShape:
 
 
 MOVE_SPEED: float = 5.0
+
+ViewMode = Literal["off", "mask", "image"]
 
 _CreateMode = Literal[
     "polygon",
@@ -191,6 +194,12 @@ class Canvas(QtWidgets.QWidget):
 
     _show_labels = False
 
+    # Read-only views; any mode but "off" ignores editing input (pan/zoom still
+    # work). "mask" renders shapes as translucent label-color regions, "image"
+    # shows the bare image.
+    _view_mode: ViewMode = "off"
+    _view_mode_alpha = 128
+
     _prev_point: QPointF
     _prev_move_point: QPointF
     _drag_anchor: tuple[QPointF, QRectF]
@@ -281,6 +290,30 @@ class Canvas(QtWidgets.QWidget):
 
     def set_show_labels(self, value: bool) -> None:
         self._show_labels = value
+
+    @property
+    def view_mode(self) -> ViewMode:
+        return self._view_mode
+
+    def set_view_mode(self, mode: ViewMode) -> None:
+        if mode == self._view_mode:
+            return
+        self._view_mode = mode
+        if mode != "off":
+            self._set_highlight(
+                hovered_shape=None,
+                hovered_edge=None,
+                hovered_vertex=None,
+                hovered_rotation=None,
+            )
+            self.deselect_shape()
+        self.update()
+        self._update_status()
+
+    def set_view_mode_alpha(self, alpha: int) -> None:
+        self._view_mode_alpha = max(0, min(255, alpha))
+        if self._view_mode != "off":
+            self.update()
 
     def set_allow_out_of_bounds_points(self, value: bool) -> None:
         self._allow_out_of_bounds_points = value
@@ -419,6 +452,25 @@ class Canvas(QtWidgets.QWidget):
         self._ai_assist_session.output_format = output_format
         self._clear_ai_existing_shape_highlights()
 
+    def set_ai_polygon_simplification(
+        self, simplification: _automation.PolygonSimplification | None
+    ) -> None:
+        self._ai_assist_session.polygon_simplification = simplification
+
+    def segment_box_with_ai(
+        self,
+        *,
+        box_xyxy: tuple[float, float, float, float],
+        polygon_simplification: _automation.PolygonSimplification | None,
+    ) -> Shape | None:
+        image: np.ndarray = _utils.img_qt_to_arr(img_qt=self.pixmap.toImage())
+        return self._ai_assist_session.segment_box_to_polygon(
+            image=image[:, :, :3],
+            image_id=str(self._pixmap_hash),
+            box_xyxy=box_xyxy,
+            polygon_simplification=polygon_simplification,
+        )
+
     def set_ai_existing_shape_suppression(self, enabled: bool) -> None:
         if self._ai_suppress_existing_shape_matches == enabled:
             return
@@ -549,7 +601,11 @@ class Canvas(QtWidgets.QWidget):
 
     def _update_status(self, extra_messages: list[str] | None = None) -> None:
         messages: list[str] = []
-        if self.mode == _CanvasMode.CREATE:
+        if self._view_mode == "mask":
+            messages.append(self.tr("View mode: mask (read-only)"))
+        elif self._view_mode == "image":
+            messages.append(self.tr("View mode: image only (read-only)"))
+        elif self.mode == _CanvasMode.CREATE:
             messages.append(self.tr("Creating %r") % self.create_mode)
             messages.append(self._get_create_mode_message())
             if self._current is not None:
@@ -619,6 +675,8 @@ class Canvas(QtWidgets.QWidget):
     def _dispatch_pointer_move(self, pos: QPointF, event: QtGui.QMouseEvent) -> None:
         if self._pan_anchor is not None:
             self._advance_pan(event=event)
+            return
+        if self._view_mode != "off":
             return
         if self.mode == _CanvasMode.CREATE:
             self._track_drawing_cursor(pos=pos, event=event)
@@ -965,6 +1023,8 @@ class Canvas(QtWidgets.QWidget):
     def _dispatch_pointer_press(self, pos: QPointF, event: QtGui.QMouseEvent) -> None:
         self._clear_ai_existing_shape_highlights()
         button = event.button()
+        if self._view_mode != "off" and button != Qt.MouseButton.MiddleButton:
+            return
         if button == Qt.MouseButton.LeftButton:
             self._press_left(pos=pos, event=event)
             return
@@ -1165,6 +1225,8 @@ class Canvas(QtWidgets.QWidget):
 
     def _dispatch_pointer_release(self, event: QtGui.QMouseEvent) -> None:
         button = event.button()
+        if self._view_mode != "off" and button != Qt.MouseButton.MiddleButton:
+            return
         if button == Qt.MouseButton.RightButton:
             self._release_right(event=event)
             return
@@ -1289,6 +1351,8 @@ class Canvas(QtWidgets.QWidget):
         return len(self._current.points) >= 3
 
     def mouseDoubleClickEvent(self, a0: QtGui.QMouseEvent) -> None:
+        if self._view_mode != "off":
+            return
         if self._double_click != "close":
             return
         if not self._can_close_shape():
@@ -1488,6 +1552,10 @@ class Canvas(QtWidgets.QWidget):
 
     def _render_layers(self) -> tuple[Callable[[QtGui.QPainter], None], ...]:
         # Order is z-order, back-to-front.
+        if self._view_mode == "mask":
+            return (self._draw_pixmap_layer, self._draw_view_mode_layer)
+        if self._view_mode == "image":
+            return (self._draw_pixmap_layer,)
         return (
             self._draw_pixmap_layer,
             self._draw_crosshair_layer,
@@ -1548,6 +1616,18 @@ class Canvas(QtWidgets.QWidget):
                 shape=shape, highlighted=shape is self.hovered_shape
             )
             render_shape(painter=painter, shape=shape, context=context)
+
+    def _draw_view_mode_layer(self, painter: QtGui.QPainter) -> None:
+        for shape in self.shapes:
+            if not shape.visible:
+                continue
+            context = self._render_context(shape=shape, highlighted=False)
+            render_shape_overlay(
+                painter=painter,
+                shape=shape,
+                context=context,
+                alpha=self._view_mode_alpha,
+            )
 
     def _draw_active_shape_layer(self, painter: QtGui.QPainter) -> None:
         if self._current is None:
@@ -1810,7 +1890,9 @@ class Canvas(QtWidgets.QWidget):
         self._clear_ai_existing_shape_highlights()
         modifiers = a0.modifiers()
         key = a0.key()
-        if self.mode == _CanvasMode.CREATE:
+        if self._view_mode != "off":
+            pass
+        elif self.mode == _CanvasMode.CREATE:
             if key == Qt.Key.Key_Escape and self._current is not None:
                 self._cancel_current_shape()
             elif (
@@ -1834,7 +1916,9 @@ class Canvas(QtWidgets.QWidget):
 
     def keyReleaseEvent(self, a0: QtGui.QKeyEvent) -> None:
         modifiers = a0.modifiers()
-        if self.mode == _CanvasMode.CREATE:
+        if self._view_mode != "off":
+            pass
+        elif self.mode == _CanvasMode.CREATE:
             if not modifiers:
                 self._snapping = True
         elif self.mode == _CanvasMode.EDIT:

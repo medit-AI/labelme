@@ -102,6 +102,35 @@ def render_shape(
         _paint_shape_label(painter=painter, shape=shape, context=context)
 
 
+def render_shape_overlay(
+    painter: QtGui.QPainter, shape: Shape, context: ShapeRenderContext, alpha: int
+) -> None:
+    """Paint a shape as a flat, translucent label-color region.
+
+    View mode draws no outline or vertices so the image boundary under the
+    annotation stays visible through the blended color.
+    """
+    if shape.mask is None and len(shape.points) == 0:
+        return
+
+    color = QtGui.QColor(context.palette.line)
+    color.setAlpha(alpha)
+
+    if shape.shape_type == "mask" and shape.mask is not None:
+        _draw_mask_image(painter=painter, shape=shape, scale=context.scale, fill=color)
+        return
+
+    paths = _build_shape_points_paths(shape=shape, context=context)
+    if shape.shape_type in ("line", "linestrip"):
+        pen = QtGui.QPen(color)
+        pen.setWidth(PEN_WIDTH)
+        painter.strokePath(paths.line, pen)
+    elif shape.shape_type in ("point", "points"):
+        painter.fillPath(paths.vertices, color)
+    else:
+        painter.fillPath(paths.line, color)
+
+
 def _paint_shape_label(
     *,
     painter: QtGui.QPainter,
@@ -128,19 +157,9 @@ def _paint_shape_mask(
 ) -> None:
     assert shape.mask is not None
     fill = context.palette.select_fill if context.selected else context.palette.fill
-    image_to_draw = np.zeros(shape.mask.shape + (4,), dtype=np.uint8)
-    image_to_draw[shape.mask] = fill.getRgb()
-    qimage = QtGui.QImage.fromData(_utils.img_arr_to_data(image_to_draw))
-    origin = shape.points[0]
-    target_top_left = origin * context.scale
-    target_rect = QtCore.QRectF(
-        target_top_left[0],
-        target_top_left[1],
-        qimage.width() * context.scale,
-        qimage.height() * context.scale,
-    )
-    painter.drawImage(target_rect, qimage)
+    _draw_mask_image(painter=painter, shape=shape, scale=context.scale, fill=fill)
 
+    origin = shape.points[0]
     path = QtGui.QPainterPath()
     # Pad so a region touching the mask border still has a background ring to
     # close its contour against; the resulting offset is removed below.
@@ -152,6 +171,27 @@ def _paint_shape_mask(
         for point in contour[1:]:
             path.lineTo(QtCore.QPointF(point[1], point[0]) * context.scale)
     painter.drawPath(path)
+
+
+def _draw_mask_image(
+    *,
+    painter: QtGui.QPainter,
+    shape: Shape,
+    scale: float,
+    fill: QtGui.QColor,
+) -> None:
+    assert shape.mask is not None
+    image_to_draw = np.zeros(shape.mask.shape + (4,), dtype=np.uint8)
+    image_to_draw[shape.mask] = fill.getRgb()
+    qimage = QtGui.QImage.fromData(_utils.img_arr_to_data(image_to_draw))
+    target_top_left = shape.points[0] * scale
+    target_rect = QtCore.QRectF(
+        target_top_left[0],
+        target_top_left[1],
+        qimage.width() * scale,
+        qimage.height() * scale,
+    )
+    painter.drawImage(target_rect, qimage)
 
 
 @dataclasses.dataclass(frozen=True)
