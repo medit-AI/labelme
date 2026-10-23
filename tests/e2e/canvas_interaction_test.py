@@ -271,6 +271,68 @@ def test_add_point_on_edge(
     close_or_pause(qtbot=qtbot, widget=annotated_win, pause=pause)
 
 
+def _longest_edge(shape: Shape) -> tuple[int, QPointF, QPointF]:
+    """Index (end vertex) of the shape's longest edge, its midpoint and normal."""
+    starts = np.roll(shape.points, 1, axis=0)
+    index = int(np.argmax(np.linalg.norm(shape.points - starts, axis=1)))
+    start, end = starts[index], shape.points[index]
+    direction = (end - start) / np.linalg.norm(end - start)
+    mid = (start + end) / 2
+    return (
+        index,
+        QPointF(float(mid[0]), float(mid[1])),
+        QPointF(float(-direction[1]), float(direction[0])),
+    )
+
+
+@pytest.mark.gui
+def test_drag_edge_inserts_and_moves_point(
+    qtbot: QtBot,
+    annotated_win: MainWindow,
+    tmp_path: Path,
+    pause: bool,
+) -> None:
+    canvas = annotated_win._canvas_widgets.canvas
+    shape = canvas.shapes[_SHAPE_INDEX]
+    assert shape.shape_type == "polygon"
+    original_points = shape.points.copy()
+    index, edge_mid, normal = _longest_edge(shape=shape)
+    target = edge_mid + normal * 12
+
+    _hover_and_drag(
+        qtbot=qtbot, canvas=canvas, start_image_pos=edge_mid, end_image_pos=target
+    )
+
+    assert len(shape.points) == len(original_points) + 1
+    assert shape.points[index] == pytest.approx([target.x(), target.y()], abs=1.5)
+    assert np.allclose(np.delete(shape.points, index, axis=0), original_points)
+
+    _save_and_check(win=annotated_win, tmp_path=tmp_path)
+    close_or_pause(qtbot=qtbot, widget=annotated_win, pause=pause)
+
+
+@pytest.mark.gui
+def test_click_edge_does_not_insert_point(
+    qtbot: QtBot,
+    annotated_win: MainWindow,
+    pause: bool,
+) -> None:
+    canvas = annotated_win._canvas_widgets.canvas
+    shape = canvas.shapes[_SHAPE_INDEX]
+    original_points = shape.points.copy()
+    _index, edge_mid, _normal = _longest_edge(shape=shape)
+
+    mid_widget = image_to_widget_pos(canvas=canvas, image_pos=edge_mid)
+    qtbot.mouseMove(canvas, pos=mid_widget)
+    qtbot.wait(100)
+    qtbot.mouseClick(canvas, Qt.MouseButton.LeftButton, pos=mid_widget)
+    qtbot.wait(50)
+
+    assert np.array_equal(shape.points, original_points)
+
+    close_or_pause(qtbot=qtbot, widget=annotated_win, pause=pause)
+
+
 @pytest.mark.gui
 def test_add_point_via_context_menu_action(
     qtbot: QtBot,

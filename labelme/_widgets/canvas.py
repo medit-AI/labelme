@@ -102,6 +102,10 @@ def _shape_to_draft(shape: Shape) -> _DraftShape:
 
 MOVE_SPEED: float = 5.0
 
+# Screen pixels an edge drag must travel before it inserts a vertex, so a
+# plain click (with hand jitter) on an edge only selects the shape.
+EDGE_DRAG_THRESHOLD_PX: Final[float] = 3.0
+
 ViewMode = Literal["off", "mask", "image"]
 
 _CreateMode = Literal[
@@ -208,6 +212,9 @@ class Canvas(QtWidgets.QWidget):
     _rotation_original_points: np.ndarray
 
     _pan_anchor: QPointF | None
+    # (shape, edge index, press position) of a left press on an edge, until
+    # the drag either inserts a vertex there or the button is released.
+    _pending_edge_insert: tuple[Shape, int, QPointF] | None = None
 
     _highlight: VertexHighlight | None
     _rotation_highlight: VertexHighlight | None
@@ -838,6 +845,9 @@ class Canvas(QtWidgets.QWidget):
         self, pos: QPointF, event: QtGui.QMouseEvent
     ) -> None:
         is_shift_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if self._pending_edge_insert is not None:
+            if not self._begin_edge_insert_drag(pos=pos):
+                return  # below the drag threshold: neither insert nor move yet
         if self._is_vertex_selected():
             self._drag_hovered_vertex(pos=pos, is_shift_pressed=is_shift_pressed)
             return
@@ -959,6 +969,8 @@ class Canvas(QtWidgets.QWidget):
                 hovered_rotation=None,
             )
             self._apply_cursor(CursorRole.HANDLE)
+            if target.shape.can_add_point():
+                status_messages.append(self.tr("Drag to add & move a point"))
             status_messages.append(self.tr("ALT + Click to create point on shape"))
             self.update()
             return
@@ -981,6 +993,38 @@ class Canvas(QtWidgets.QWidget):
             return
 
         typing.assert_never(target.kind)
+
+    def _begin_edge_insert_drag(self, pos: QPointF) -> bool:
+        """Turn a press on an edge into a new vertex once the drag starts.
+
+        Returns False while the cursor is still within the drag threshold, so
+        a plain click on an edge only selects the shape as before.
+        """
+        assert self._pending_edge_insert is not None
+        shape, edge_index, press_pos = self._pending_edge_insert
+        moved = np.hypot(pos.x() - press_pos.x(), pos.y() - press_pos.y())
+        if moved * self.scale < EDGE_DRAG_THRESHOLD_PX:
+            return False
+        self._pending_edge_insert = None
+        # Insert at the point of the edge closest to where the press landed,
+        # so the outline does not jump before the drag moves it.
+        start = shape.points[edge_index - 1]
+        end = shape.points[edge_index]
+        segment = end - start
+        length_squared = float(segment @ segment)
+        press = np.array([press_pos.x(), press_pos.y()])
+        t = (
+            0.0
+            if length_squared == 0
+            else float(np.clip((press - start) @ segment / length_squared, 0.0, 1.0))
+        )
+        shape.insert_point(edge_index, start + t * segment)
+        self.hovered_shape = shape
+        self._hovered_vertex = edge_index
+        self._hovered_edge = None
+        self._highlight_vertex(index=edge_index, mode="move")
+        self._is_moving_shape = True
+        return True
 
     def add_point_to_edge(self) -> None:
         shape = self._last_hovered_shape
@@ -1177,9 +1221,20 @@ class Canvas(QtWidgets.QWidget):
 
     def _press_left_while_editing(self, pos: QPointF, event: QtGui.QMouseEvent) -> None:
         modifiers = event.modifiers()
+        self._pending_edge_insert = None
         if self._maybe_modify_polygon_topology(modifiers=modifiers):
             # remove_selected_point already repainted; just consume the press.
             return
+        if (
+            modifiers == Qt.KeyboardModifier.NoModifier
+            and self._is_edge_selected()
+            and self.hovered_shape is not None
+            and self.hovered_shape.can_add_point()
+        ):
+            # Dragging an edge adds a vertex there and drags it (decided once
+            # the drag passes the threshold); a plain click still just selects.
+            assert self._hovered_edge is not None
+            self._pending_edge_insert = (self.hovered_shape, self._hovered_edge, pos)
         if self._is_rotation_point_selected():
             self._capture_rotation_anchors()
         self._select_shape_point(
@@ -1254,6 +1309,7 @@ class Canvas(QtWidgets.QWidget):
         self.update()
 
     def _release_left(self) -> None:
+        self._pending_edge_insert = None
         if self.mode != _CanvasMode.EDIT:
             return
         if self.hovered_shape is None:
