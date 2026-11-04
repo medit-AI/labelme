@@ -14,6 +14,7 @@
 | `Shift+P` | 선택한 폴리곤에 Polygon Simplify 적용 | 편집 > Simplify Selected Polygons |
 | `Ctrl+Z` | 적용 결과 되돌리기 | 편집 > Undo |
 | `Ctrl+J` | 편집 모드로 돌아가기 | 편집 > Edit Shapes |
+| 선 드래그 | 편집 모드에서 폴리곤의 선을 끌면 그 위치에 점이 추가되고 함께 이동 | – |
 
 단축키는 `~/.labelmerc`의 `shortcuts:` 항목에서 바꿀 수 있습니다(`toggle_view_mode`, `toggle_polygon_simplify`, `simplify_selected_polygons`).
 
@@ -48,6 +49,16 @@ AI(AI-Points, AI-Box, 텍스트 프롬프트)가 만든 폴리곤은 약 1px마�
 - **AI로 그릴 때**: 켜져 있으면 결과 폴리곤에 자동으로 적용됩니다. 툴바의 **Polygon Simplify > Enable** 체크박스나 `P`로 켜고 끕니다.
 - **이미 그린 폴리곤**: 폴리곤을 선택하고 `Shift+P`를 누릅니다(또는 Options 창의 **Apply to Selected Polygons**). `Ctrl+Z`로 되돌릴 수 있습니다.
   - 결과의 점이 원래보다 적을 때만 바뀝니다. 손으로 그린 단순한 폴리곤은 그대로 유지됩니다.
+
+### 점이 부족할 때: 선을 드래그해서 점 추가
+
+단순화 후 점이 적어 원하는 위치를 고치기 어려우면, 편집 모드(`Ctrl+J`)에서 **폴리곤의 선을 바로 드래그**하세요.
+
+- 누른 위치에서 가장 가까운 선 위 지점에 새 점이 생기고, 그 점이 마우스를 따라 움직입니다.
+- 선을 클릭만 하고 떼면 점이 추가되지 않습니다. 화면에서 3px 이상 끌었을 때만 추가됩니다.
+- 도형 전체를 옮기려면 선이 아니라 도형 **안쪽**을 드래그합니다.
+- 기존 방식(`Alt+클릭`으로 점 추가, `Alt+Shift+클릭`으로 점 삭제)도 그대로 쓸 수 있습니다.
+- polygon과 linestrip에서 동작하고, `Ctrl+Z`로 되돌릴 수 있습니다.
 
 ### 처리 순서
 

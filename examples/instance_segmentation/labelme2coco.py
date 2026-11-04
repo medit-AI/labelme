@@ -303,7 +303,11 @@ def _find_labelme_pairs(
     pairs: list[tuple[Path, Path]] = []
     seen: set[Path] = set()
     for input_dir in input_dirs:
+        if not Path(input_dir).is_dir():
+            print(f"WARNING: input dir does not exist (quote paths with spaces?): {input_dir!r}")
+            continue
         json_paths = deep_search_files(basepath=str(input_dir), exts=[".json"])
+        print(f"{input_dir}: found {len(json_paths)} json files")
         for json_path in sorted(Path(p) for p in json_paths):
             if json_path in seen:
                 continue
@@ -400,7 +404,16 @@ def convert_labelme_dirs_to_coco(
                 class_name_to_id[name] = digit_class_max + i
                 
             
-    color_map_table = get_teeth_color_table(normalize=False, dark_mode=True, DARK_1ST = .25) if color_map  == 'teeth' else None
+    color_map_table = (
+        get_teeth_color_table(
+            normalize=False,
+            dark_mode=True,
+            DARK_1ST=0.25,
+            size=max(class_name_to_id.values(), default=0) + 1,
+        )
+        if color_map == "teeth"
+        else None
+    )
 
             # class_name_to_id = {name: i for i, name in enumerate(label_names)}
         # class_name_to_id = {name: i for i, name in enumerate(label_names)}
@@ -603,76 +616,118 @@ def _write_coco_dataset(
     return out_ann_file
 
     
-def get_teeth_color_table(normalize=False, dark_mode=True, DARK_1ST = .25, as_fdi=False):
-    """
-    https://github.com/tensorflow/models/blob/master/research/deeplab/utils/get_dataset_colormap.py
-    """
-    color_table = np.asarray([
-        [255, 255, 255],  # bg
-        [6, 230, 230],  # 1
+# Universal numbering (1..32, labelme default) -> FDI two-digit number.
+_UNIVERSAL_TO_FDI: Final = np.array(
+    [0]
+    + [18, 17, 16, 15, 14, 13, 12, 11]  # 1~8   (upper right)
+    + [21, 22, 23, 24, 25, 26, 27, 28]  # 9~16  (upper left)
+    + [38, 37, 36, 35, 34, 33, 32, 31]  # 17~24 (lower left)
+    + [41, 42, 43, 44, 45, 46, 47, 48]  # 25~32 (lower right)
+)
+
+_TOOTH_COLORS: Final = np.asarray(
+    [
+        [6, 230, 230],  # 1 (central incisor)
         [80, 50, 50],  # 2
         [4, 200, 3],  # 3
         [30, 20, 240],  # 4
         [240, 10, 7],  # 5
         [224, 5, 255],  # 6
         [235, 255, 7],  # 7
-        [150, 5, 61],  # 8
-        [120, 120, 70],
-        [8, 255, 51],
-        [255, 6, 82],
-        [143, 255, 140],
-    ])
+        [150, 5, 61],  # 8 (third molar)
+    ],
+    dtype=np.float64,
+)
+_BG_COLOR: Final = (255, 255, 255)
+_OTHER_COLOR: Final = (128, 128, 128)  # non-tooth labels (e.g. 1000+)
 
-    if dark_mode:
-        norm_color_table = color_table / 255.0
-        color_table2 = np.concatenate([norm_color_table[:10] for _ in range(5)], axis=0)
 
-        norm_fdi0_color = norm_color_table[1:9]
-        color_table2[np.arange(1, 9)] = norm_fdi0_color
+def get_teeth_color_table(
+    normalize=False, dark_mode=True, DARK_1ST=0.25, as_fdi=False, size=None
+):
+    """Color table indexed directly by label id.
 
-        color_table2[np.arange(11, 19)] = norm_fdi0_color
-        color_table2[np.arange(21, 29)] = (norm_fdi0_color - DARK_1ST).clip(0, 1)
-        color_table2[np.arange(31, 39)] = (norm_fdi0_color - DARK_1ST).clip(0, 1)
-        color_table2[np.arange(41, 49)] = norm_fdi0_color
+    as_fdi=False: label id is universal numbering (1..32, labelme default).
+    as_fdi=True : label id is FDI numbering (11..18, 21..28, 31..38, 41..48).
+    Each tooth gets the color of its tooth type (FDI last digit 1..8); with
+    dark_mode the left-side quadrants (2, 3) are darkened by DARK_1ST.
+    Ids that are not teeth (0 = bg, > 32 universal / invalid FDI) get
+    white / gray. size is the table length (>= 49 and > the largest label id).
+    """
+    size = max(size or 0, 49)
+    table = np.tile(np.asarray(_OTHER_COLOR, dtype=np.float64) / 255.0, (size, 1))
+    table[0] = np.asarray(_BG_COLOR) / 255.0
+    base = _TOOTH_COLORS / 255.0
 
-        color_table = (color_table2 * 255).astype(np.uint8)
+    for universal in range(1, 33):
+        fdi = int(_UNIVERSAL_TO_FDI[universal])
+        quadrant, tooth = divmod(fdi, 10)
+        color = base[tooth - 1]
+        if dark_mode and quadrant in (2, 3):
+            color = (color - DARK_1ST).clip(0, 1)
+        table[fdi if as_fdi else universal] = color
+
     if normalize:
-        color_table = color_table / 255.
-    else:
-        color_table = color_table.astype(np.uint8)
-        
-    if as_fdi:
-        pass
-    else:
-        universal_to_fdi = np.array([
-            0,  # Index 0
-            18, 17, 16, 15, 14, 13, 12, 11,  # 1~8 (우상)
-            21, 22, 23, 24, 25, 26, 27, 28,  # 9~16 (좌상)
-            38, 37, 36, 35, 34, 33, 32, 31,  # 17~24 (좌하)
-            41, 42, 43, 44, 45, 46, 47, 48   # 25~32 (우하)
-        ])
-        
-        universal = np.arange(33)
-        fdis = universal_to_fdi[universal]
-        # color_table = color_table[fdis]
-        # new_color_table = np.zeros_like(color_table)
-        # new_color_table[universal] = color_table[fdis]
-        # fdi_colors[]
-        universal_colors = color_table[fdis]
-        
-        
-        # replcce
-        color_table = universal_colors
-    # return color_table[..., ::-1]
-    return color_table
+        return table
+    return (table * 255).astype(np.uint8)
+
+
+def _parse_splits(items: list[str]) -> dict[str, float]:
+    splits: dict[str, float] = {}
+    for item in items:
+        name, sep, weight = item.partition("=")
+        if not sep or not name:
+            raise argparse.ArgumentTypeError(f"expected NAME=WEIGHT, got {item!r}")
+        splits[name] = float(weight)
+    return splits
+
+
+def cli() -> None:
+    default_splits = [f"{k}={v}" for k, v in _DEFAULT_SPLITS.items()]
+    parser = argparse.ArgumentParser(
+        description="Convert labelme image/json pairs (deep-searched) to COCO.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--input-dirs",
+        nargs="+",
+        required=True,
+        help="input annotated directories (quote paths containing spaces)",
+    )
+    parser.add_argument(
+        "--output-dir", required=True, help="output dataset directory"
+    )
+    parser.add_argument("--labels", default=None, help="labels file (optional)")
+    parser.add_argument("--noviz", action="store_true", help="no visualization")
+    parser.add_argument(
+        "--color-map",
+        default='teeth',
+        choices=["teeth"],
+        help="visualization color table (default: imgviz default)",
+    )
+    parser.add_argument(
+        "--split",
+        nargs="+",
+        metavar="NAME=WEIGHT",
+        default=default_splits,
+        help="split names and weights",
+    )
+    parser.add_argument(
+        "--no-split", action="store_true", help="write a single dataset (no split)"
+    )
+    parser.add_argument("--seed", type=int, default=0, help="shuffle seed for split")
+    args = parser.parse_args()
+
+    convert_labelme_dirs_to_coco(
+        input_dirs=args.input_dirs,
+        output_dir=args.output_dir,
+        labels_file=args.labels,
+        noviz=args.noviz,
+        color_map=args.color_map,
+        splits=None if args.no_split else _parse_splits(args.split),
+        seed=args.seed,
+    )
 
 
 if __name__ == "__main__":
-    # main()
-    convert_labelme_dirs_to_coco(
-        "E:/dataset/Medit_AI Dropbox/Medit_AI Dropbox/Medit_AI/xray_panoramic/cbct_ios_dcm",
-        "E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm_latest_0824",
-        labels_file=None,
-        color_map='teeth',
-        
-    )
+    cli()
