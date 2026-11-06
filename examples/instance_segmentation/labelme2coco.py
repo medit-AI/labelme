@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import tqdm
 import base64
+import io
 import os
 import argparse
 import collections
@@ -19,6 +20,7 @@ from typing import List
 
 import imgviz
 import numpy as np
+import PIL.Image
 
 try:
     import pycocotools.mask  # type: ignore
@@ -379,7 +381,7 @@ def convert_labelme_dirs_to_coco(
 
     loaded = [
         (json_path, image_path, _load_pair(json_path, image_path))
-        for json_path, image_path in pairs
+        for json_path, image_path in tqdm.tqdm(pairs, desc="Loading labelme pairs")
     ]
 
     if labels_file is not None:
@@ -498,13 +500,9 @@ def _write_coco_dataset(
     data["annotations"] = []
 
     out_ann_file = output_dir / "annotations.json"
-    test_break = 10
-    for image_id, (json_path, image_path, label_file) in tqdm.tqdm(
-        enumerate(items), total=len(items)
-    ):
-        # if image_id >= test_break:
-            # break
-        print("Generating dataset from:", json_path)
+    pbar = tqdm.tqdm(enumerate(items), total=len(items))
+    for image_id, (json_path, image_path, label_file) in pbar:
+        pbar.set_postfix_str(json_path.name)
 
         # Different input_dirs can contain same-named files in different
         # sub-folders, so the output name is disambiguated with image_id
@@ -512,22 +510,38 @@ def _write_coco_dataset(
         base = f"{image_id:06d}_{image_path.stem}"
         out_img_file = output_dir / "JPEGImages" / f"{base}.jpg"
 
-        img = utils.img_data_to_arr(label_file.image_data)
-        if img.ndim == 3 and img.shape[2] == 4:
-            img = imgviz.rgba2rgb(img)
-        imgviz.io.imsave(out_img_file, img)
+        # Decoding the image to an array and re-encoding it as JPEG is the
+        # most expensive step per item (especially for large/panoramic
+        # images), and it's only actually needed when the source isn't
+        # already a plain JPEG, or when the visualization overlay below
+        # needs the decoded pixels. Otherwise just copy the original bytes.
+        img: np.ndarray | None = None
+        with PIL.Image.open(io.BytesIO(label_file.image_data)) as pil_img:
+            width, height = pil_img.size
+            can_copy_bytes = pil_img.format == "JPEG" and noviz
+
+        if can_copy_bytes:
+            out_img_file.write_bytes(label_file.image_data)
+        else:
+            img = utils.img_data_to_arr(label_file.image_data)
+            if img.ndim == 3 and img.shape[2] == 4:
+                img = imgviz.rgba2rgb(img)
+            imgviz.io.imsave(out_img_file, img)
+            height, width = img.shape[:2]
+
         data["images"].append(
             dict(
                 license=0,
                 url=None,
                 file_name=str(out_img_file.relative_to(output_dir)),
-                height=img.shape[0],
-                width=img.shape[1],
+                height=height,
+                width=width,
                 date_captured=None,
                 id=image_id,
             )
         )
 
+        img_shape = (height, width)
         masks = {}  # for area
         segmentations = collections.defaultdict(list)  # for segmentation
         for shape in label_file.shapes:
@@ -535,7 +549,7 @@ def _write_coco_dataset(
             label = shape["label"]
             group_id = shape.get("group_id")
             shape_type = shape.get("shape_type", "polygon")
-            mask = utils.shape_to_mask(img.shape[:2], points, shape_type)
+            mask = utils.shape_to_mask(img_shape, points, shape_type)
 
             if group_id is None:
                 group_id = uuid.uuid1()
@@ -698,7 +712,13 @@ def cli() -> None:
         "--output-dir", required=True, help="output dataset directory"
     )
     parser.add_argument("--labels", default=None, help="labels file (optional)")
-    parser.add_argument("--noviz", action="store_true", help="no visualization")
+    parser.add_argument(
+        "--noviz",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="skip saving Visualization/*.jpg overlays, which is the slowest "
+        "part of the conversion (default: skip; pass --no-noviz to save them)",
+    )
     parser.add_argument(
         "--color-map",
         default='teeth',
