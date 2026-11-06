@@ -31,6 +31,9 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import utils  # noqa: E402  # examples/utils.py, vendored alongside this script
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import data_handler  # noqa: E402  # examples/instance_segmentation/data_handler.py
+
 
 def _circle_to_polygon_segmentation(
     *, center: tuple[float, float], edge: tuple[float, float]
@@ -323,6 +326,76 @@ def _find_labelme_pairs(
     return pairs
 
 
+def _filter_pairs_by_mtime(
+    pairs: list[tuple[Path, Path]],
+    mtime_from: str | None,
+    mtime_to: str | None,
+    mtime_format: str,
+) -> list[tuple[Path, Path]]:
+    """Keep only pairs whose json file was last modified within
+    [mtime_from, mtime_to] (either bound optional), so a folder mixing
+    finished and in-progress annotations can be converted a-time~b-time at a
+    time. Uses data_handler.parse_timestamp for the same time parsing
+    already used to inspect dataset folders.
+    """
+    if mtime_from is None and mtime_to is None:
+        return pairs
+
+    ts_from = (
+        data_handler.parse_timestamp(mtime_from, mtime_format)
+        if mtime_from is not None
+        else float("-inf")
+    )
+    ts_to = (
+        data_handler.parse_timestamp(mtime_to, mtime_format)
+        if mtime_to is not None
+        else float("inf")
+    )
+    if ts_from > ts_to:
+        raise ValueError(f"--mtime-from ({mtime_from}) is after --mtime-to ({mtime_to})")
+
+    filtered = [
+        (json_path, image_path)
+        for json_path, image_path in pairs
+        if ts_from <= json_path.stat().st_mtime <= ts_to
+    ]
+    print(
+        f"Filtered by json mtime [{mtime_from or '-inf'}, {mtime_to or '+inf'}]: "
+        f"{len(filtered)}/{len(pairs)} pairs kept"
+    )
+    return filtered
+
+
+def _filter_pairs_by_resolution(
+    pairs: list[tuple[Path, Path]],
+    min_resol: int | None,
+    max_resol: int | None,
+) -> list[tuple[Path, Path]]:
+    """Keep only pairs whose image resolution (width * height, in pixels)
+    falls within [min_resol, max_resol] (either bound optional). Image size
+    is read via PIL without decoding pixel data, so this is cheap even for
+    large panoramic images.
+    """
+    if min_resol is None and max_resol is None:
+        return pairs
+
+    filtered = []
+    for json_path, image_path in pairs:
+        with PIL.Image.open(image_path) as pil_img:
+            width, height = pil_img.size
+        resolution = width * height
+        if min_resol is not None and resolution < min_resol:
+            continue
+        if max_resol is not None and resolution > max_resol:
+            continue
+        filtered.append((json_path, image_path))
+    print(
+        f"Filtered by resolution (width*height) [{min_resol or 0}, {max_resol or 'inf'}]: "
+        f"{len(filtered)}/{len(pairs)} pairs kept"
+    )
+    return filtered
+
+
 _DEFAULT_SPLITS: Final = types.MappingProxyType({"train": 0.9, "valid": 0.1})
 
 
@@ -352,6 +425,11 @@ def convert_labelme_dirs_to_coco(
     color_map: str | None = None,
     splits: Mapping[str, float] | None = _DEFAULT_SPLITS,
     seed: int = 0,
+    mtime_from: str | None = None,
+    mtime_to: str | None = None,
+    mtime_format: str = "%Y-%m-%d %H:%M:%S",
+    min_resol: int | None = None,
+    max_resol: int | None = None,
 ) -> dict[str, Path]:
     """Deep-search input_dirs for labelme image/json pairs (image and .json
     saved together under the same filename) and convert every pair found
@@ -361,6 +439,14 @@ def convert_labelme_dirs_to_coco(
     straight from the labels already present in the discovered jsons'
     shapes -- labelme output has no separate text label list to convert,
     it's already all in the json.
+
+    mtime_from/mtime_to (parsed with mtime_format, either bound optional)
+    restrict conversion to jsons last modified within that time range, so a
+    folder mixing finished and in-progress annotations can be converted for
+    only the a-time~b-time window that was actually completed.
+
+    min_resol/max_resol (pixels, width * height) restrict conversion to
+    images whose resolution falls in that range.
 
     splits maps a split name to its weight, e.g. {"train": 0.8, "valid": 0.1,
     "test": 0.1}. The pairs are shuffled with seed and divided by those
@@ -378,6 +464,11 @@ def convert_labelme_dirs_to_coco(
 
     pairs = _find_labelme_pairs(input_dirs=input_dirs)
     print(f"Found {len(pairs)} labelme image/json pairs")
+
+    pairs = _filter_pairs_by_mtime(
+        pairs, mtime_from=mtime_from, mtime_to=mtime_to, mtime_format=mtime_format
+    )
+    pairs = _filter_pairs_by_resolution(pairs, min_resol=min_resol, max_resol=max_resol)
 
     loaded = [
         (json_path, image_path, _load_pair(json_path, image_path))
@@ -736,6 +827,38 @@ def cli() -> None:
         "--no-split", action="store_true", help="write a single dataset (no split)"
     )
     parser.add_argument("--seed", type=int, default=0, help="shuffle seed for split")
+    parser.add_argument(
+        "--mtime-from",
+        default=None,
+        help="only convert pairs whose json file was last modified at or after "
+        "this time (format: --mtime-format), for folders mixing finished and "
+        "in-progress annotations",
+    )
+    parser.add_argument(
+        "--mtime-to",
+        default=None,
+        help="only convert pairs whose json file was last modified at or "
+        "before this time (format: --mtime-format)",
+    )
+    parser.add_argument(
+        "--mtime-format",
+        default="%Y-%m-%d %H:%M:%S",
+        help="strptime format used to parse --mtime-from/--mtime-to",
+    )
+    parser.add_argument(
+        "--min-resol",
+        type=int,
+        default=None,
+        help="only convert pairs whose image resolution (width * height, in "
+        "pixels) is at least this value",
+    )
+    parser.add_argument(
+        "--max-resol",
+        type=int,
+        default=None,
+        help="only convert pairs whose image resolution (width * height, in "
+        "pixels) is at most this value",
+    )
     args = parser.parse_args()
 
     convert_labelme_dirs_to_coco(
@@ -746,8 +869,27 @@ def cli() -> None:
         color_map=args.color_map,
         splits=None if args.no_split else _parse_splits(args.split),
         seed=args.seed,
+        mtime_from=args.mtime_from,
+        mtime_to=args.mtime_to,
+        mtime_format=args.mtime_format,
+        min_resol=args.min_resol,
+        max_resol=args.max_resol,
     )
 
 
 if __name__ == "__main__":
     cli()
+
+
+
+# python examples\instance_segmentation\labelme2coco.py `
+# --input-dirs "E:/dataset/Medit_AI Dropbox/Medit_AI Dropbox/Medit_AI/xray_panoramic/cbct_ios_dcm" `
+# --output-dir "E:/dataset/reverse_tomosynthesis/kaggle_xrays/cbct_ios_dcm_latest_1106" `
+# --mtime-to "2026-11-06 14:19:00"
+
+
+# python examples\instance_segmentation\labelme2coco.py `
+# --input-dirs "E:/dataset/Medit_AI Dropbox/Medit_AI Dropbox/Medit_AI/xray_panoramic/seoul_univ" `
+# --output-dir "E:/dataset/reverse_tomosynthesis/kaggle_xrays/seoul_univ_inspect_1106" `
+# --mtime-from "2026-10-22 16:50:00" `
+# --mtime-to "2026-11-06 14:19:00"
